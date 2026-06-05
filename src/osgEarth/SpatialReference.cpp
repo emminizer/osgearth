@@ -1319,9 +1319,8 @@ SpatialReference::transformExtentToMBR(
     // TODO: rethink this to be more generic.
     if (isGeographic() && (to_srs->isMercator() || to_srs->isSphericalMercator()))
     {
-        osg::ref_ptr<const Profile> merc = Profile::create(Profile::SPHERICAL_MERCATOR);
-        in_out_ymin = clamp(in_out_ymin, merc->getLatLongExtent().yMin(), merc->getLatLongExtent().yMax());
-        in_out_ymax = clamp(in_out_ymax, merc->getLatLongExtent().yMin(), merc->getLatLongExtent().yMax());
+        in_out_ymin = clamp(in_out_ymin, MERC_MIN_LATITUDE, MERC_MAX_LATITUDE);
+        in_out_ymax = clamp(in_out_ymax, MERC_MIN_LATITUDE, MERC_MAX_LATITUDE);
     }
 
     double height = in_out_ymax - in_out_ymin;
