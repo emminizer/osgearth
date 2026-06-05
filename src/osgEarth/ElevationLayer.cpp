@@ -259,7 +259,8 @@ ElevationLayer::assembleHeightField(const TileKey& key, ProgressCallback* progre
                 heights[i] = NO_DATA_VALUE;
 
             // Working set of points. it's much faster to xform an entire vector all at once.
-            std::vector<osg::Vec3d> points;
+            // Reuse a thread_local vector to avoid memory allocation/deallocation subsequent calls
+            static thread_local std::vector<osg::Vec3d> points;
             points.resize(cols * rows);
 
             double minx, miny, maxx, maxy;
