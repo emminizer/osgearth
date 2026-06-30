@@ -18,7 +18,7 @@
 using namespace osgEarth;
 using namespace osgEarth::Util;
 
-#define LC "[SimplerPager] "
+#define LC "[SimplePager] "
 
 
 SimplePager::SimplePager(const osgEarth::Map* map, const osgEarth::Profile* profile) :
@@ -34,6 +34,15 @@ SimplePager::SimplePager(const osgEarth::Map* map, const osgEarth::Profile* prof
         _mapProfile = Profile::create(Profile::GLOBAL_GEODETIC);
     }
 }
+
+void SimplePager::setTimeoutSeconds(double value)
+{
+    _timeoutSeconds = value;
+    forEachNodeOfType<PagedNode2>(this, [&](auto* node)
+        {
+            node->setTimeoutSeconds(_timeoutSeconds);
+        });
+}   
 
 void SimplePager::setEnableCancelation(bool value)
 {
@@ -280,7 +289,6 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
 
     if (hasChildren)
     {
-        //osg::ref_ptr<PagedNode2> pagedNode = new PagedNode2();
         osg::ref_ptr<PagedNode2> pagedNode;
         if (_createPagedNodeFunction)
             pagedNode = _createPagedNodeFunction(key);
@@ -324,8 +332,10 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
             if (ccExtent.isValid())
             {
                 // if the extent is more than 90 degrees, bail
-                GeoExtent geodeticExtent = ccExtent.transform(ccExtent.getSRS()->getGeographicSRS());
-                if (geodeticExtent.width() < 90.0 && geodeticExtent.height() < 90.0)
+                auto geoSRS = ccExtent.getSRS()->getGeographicSRS();
+                auto geodeticExtent = ccExtent.transform(geoSRS);
+
+                if (geodeticExtent.isValid() && geodeticExtent.width() < 90.0 && geodeticExtent.height() < 90.0)
                 {
                     // get the geocentric tile center:
                     osg::Vec3d tileCenter;
@@ -353,6 +363,8 @@ SimplePager::createChildNode(const TileKey& key, ProgressCallback* progress)
             pagedNode->setName(getName() + " " + key.str());
 
         pagedNode->setPriorityScale(_priorityScale);
+
+        pagedNode->setTimeoutSeconds(_timeoutSeconds);
 
         // Now set up a loader that will load the child data
         osg::observer_ptr<SimplePager> pager_weakptr(this);
