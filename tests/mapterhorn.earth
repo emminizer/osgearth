@@ -4,10 +4,11 @@ https://mapterhorn.com/
 -->
 <Map name="Mapterhorn Elevation">    
     <XYZElevation name="Mapterhorn Elevation">
-        <url>https://elevation-tiles-prod.s3.amazonaws.com/terrarium/{z}/{x}/{y}.png</url>
+        <url>https://tiles.mapterhorn.com/{z}/{x}/{y}.webp</url>
         <elevation_encoding>terrarium</elevation_encoding>
         <max_level>12</max_level>
         <stitch_edges>true</stitch_edges>
+        <tile_size>512</tile_size>
     </XYZElevation>
 
     <ContourMap name="Color Ramp"/>
