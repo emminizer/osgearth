@@ -448,6 +448,7 @@ SET(TARGET_H
     Utils
     UTMGraticule
     UTMLabelingEngine
+    VertexCompression
     VerticalDatum
     VideoLayer
     ViewFitter
