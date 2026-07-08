@@ -338,7 +338,6 @@
 #include <osgEarth/TileSourceElevationLayer>
 #include <osgEarth/TileSourceImageLayer>
 #include <osgEarth/TileVisitor>
-#include <osgEarth/TiledFeatureModelGraph>
 #include <osgEarth/TiledFeatureModelLayer>
 #include <osgEarth/TiledModelLayer>
 #include <osgEarth/TimeControl>
