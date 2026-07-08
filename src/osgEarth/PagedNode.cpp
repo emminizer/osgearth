@@ -145,7 +145,7 @@ PagedNode2::traverseChildren(osg::NodeVisitor& nv)
 {
     if (_refinePolicy == REFINE_REPLACE && _merged.has_value(true))
     {
-        _loaded.value()->accept(nv);
+        _payload->accept(nv);
     }
     else
     {
