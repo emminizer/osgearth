@@ -11,6 +11,7 @@
 #include <osg/Geometry>
 #include <osg/GL>
 #include <osg/NodeVisitor>
+#include <osg/Vec2f>
 #include <osg/Vec3f>
 #include <osg/Vec4f>
 #include <osg/Vec4ub>
@@ -113,10 +114,47 @@ namespace osgEarth
         }
     }
 
+    inline void compressTexCoordArrays(osg::Geometry* geom)
+    {
+        if (!geom)
+            return;
+
+        for (unsigned unit = 0; unit < geom->getNumTexCoordArrays(); ++unit)
+        {
+            auto* texCoords = dynamic_cast<osg::Vec3Array*>(geom->getTexCoordArray(unit));
+            if (!texCoords)
+                continue;
+
+            bool allLayersZero = true;
+            for (const auto& texCoord : *texCoords)
+            {
+                if (texCoord.z() != 0.0f)
+                {
+                    allLayersZero = false;
+                    break;
+                }
+            }
+
+            if (!allLayersZero)
+                continue;
+
+            auto* packed = new osg::Vec2Array(texCoords->getBinding());
+            packed->setNormalize(texCoords->getNormalize());
+            packed->setPreserveDataType(texCoords->getPreserveDataType());
+            packed->reserve(texCoords->size());
+            for (const auto& texCoord : *texCoords)
+            {
+                packed->push_back(osg::Vec2f(texCoord.x(), texCoord.y()));
+            }
+            geom->setTexCoordArray(unit, packed, packed->getBinding());
+        }
+    }
+
     inline void compressVertexArrays(osg::Geometry* geom)
     {
         compressNormalArray(geom);
         compressColorArray(geom);
+        compressTexCoordArrays(geom);
     }
 
     struct CompressVertexArraysVisitor : public osg::NodeVisitor
