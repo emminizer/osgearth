@@ -102,7 +102,7 @@ namespace
                 }
                 for (int j = 0; j < 8; ++j)
                 {
-                    resultBB.expandBy(initBB.corner(i) * instanceTransform);
+                    resultBB.expandBy(initBB.corner(j) * instanceTransform);
                 }
                 
             }

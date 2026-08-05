@@ -1079,10 +1079,17 @@ public:
             }
             for (unsigned int i = 0; i < meshGroup->getNumChildren(); ++i)
             {
-                osg::Geometry* geom = dynamic_cast<osg::Geometry*>(meshGroup->getChild(i));
-                if (geom)
+                osg::Geode* geode = meshGroup->getChild(i)->asGeode();
+                if (!geode)
+                    continue;
+
+                for (unsigned int j = 0; j < geode->getNumDrawables(); ++j)
                 {
-                    builder.installInstancing(geom);
+                    osg::Geometry* geom = geode->getDrawable(j)->asGeometry();
+                    if (geom)
+                    {
+                        builder.installInstancing(geom);
+                    }
                 }
             }
 
