@@ -448,15 +448,15 @@ public:
 
             else if (!imageEmbedded) // load from URI
             {
-                osgEarth::ReadResult rr = imageURI.readImage(env.readOptions);
-                if(rr.succeeded())
-                {
-                    img = rr.releaseImage();
-                    if (img.valid())
-                    {
-                        img->flipVertical();
-                    }
-                }
+                // GLTF images are assumed to be flipped so that the top of the image is the first row of pixels. OSG images are assumed to be flipped so that the bottom of the image is the first row of pixels. So we need to flip the image vertically when loading it.
+                // We use this .flipvertical psuedoloader to flip the image inside of a loader so the flipped image is cached if
+                // the same image is used again.
+                imageURI = URI(imageURI.full() + ".flipvertical");
+                osgDB::ReaderWriter::ReadResult rr =
+                    osgDB::Registry::instance()->readImageImplementation(
+                        imageURI.full(), env.readOptions);
+                if (rr.validImage())
+                    img = rr.takeImage();
             }
 
             // If the image loaded OK, create the texture

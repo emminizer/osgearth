@@ -583,6 +583,7 @@ set(TARGET_SRC
     Filter.cpp
     FilterContext.cpp
     FilteredFeatureSource.cpp
+    FlipVerticalPseudoLoader.cpp
     FlatteningLayer.cpp
     FractalElevationLayer.cpp
     FrameClock.cpp
