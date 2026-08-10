@@ -13,6 +13,11 @@ add_osgearth_plugin(
     TARGET osgdb_gltf
     HEADERS ${TARGET_H}
     SOURCES ${TARGET_SRC} )
+
+find_package(meshoptimizer QUIET)
+if(meshoptimizer_FOUND)
+    target_link_libraries(osgdb_gltf PRIVATE meshoptimizer::meshoptimizer)
+endif()
     
 include_directories(
     ${OSGEARTH_EMBEDDED_THIRD_PARTY_DIR}/tinygltf 

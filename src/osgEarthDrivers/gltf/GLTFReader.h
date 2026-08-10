@@ -25,6 +25,13 @@
 #include <osgEarth/ShaderUtils>
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/StateTransition>
+#include <osgEarth/JsonUtils>
+#include <osgEarth/BuildConfig>
+#ifdef OSGEARTH_HAVE_MESH_OPTIMIZER
+#include <meshoptimizer.h>
+#endif
+#include <limits>
+#include <sstream>
 
 using namespace osgEarth;
 using namespace osgEarth::Util;
@@ -41,8 +48,21 @@ public:
 
     struct NodeBuilder;
 
+    static const char* meshoptFallbackURI()
+    {
+        return "__osgearth_meshopt_fallback__.bin";
+    }
+
+    static bool isMeshoptFallbackURI(const std::string& uri)
+    {
+        return uri.find(meshoptFallbackURI()) != std::string::npos;
+    }
+
     static std::string ExpandFilePath(const std::string &filepath, void * userData)
     {
+        if (isMeshoptFallbackURI(filepath))
+            return filepath;
+
         const std::string& referrer = *(const std::string*)userData;
         URIContext context(referrer);
         osgEarth::URI uri(filepath, context);
@@ -54,6 +74,12 @@ public:
     static bool ReadWholeFile(std::vector<unsigned char> *out, std::string *err,
         const std::string &filepath, void *)
     {
+        if (isMeshoptFallbackURI(filepath))
+        {
+            out->assign(1, 0u);
+            return true;
+        }
+
         auto result = URI(filepath).readString();
         if (result.failed())
         {
@@ -66,13 +92,203 @@ public:
         return true;
     }
 
+    static bool LoadImageData(tinygltf::Image* image, const int imageIndex,
+        std::string* err, std::string* warn, int requestedWidth,
+        int requestedHeight, const unsigned char* bytes, int size, void* userData)
+    {
+        // stb_image does not support WebP. Keep embedded WebP data encoded so
+        // makeTextureFromModel can pass it through osgEarth's WebP plugin.
+        const bool isWebP =
+            image->mimeType == "image/webp" ||
+            (size >= 12 &&
+             memcmp(bytes, "RIFF", 4) == 0 &&
+             memcmp(bytes + 8, "WEBP", 4) == 0);
+
+        if (isWebP)
+        {
+            image->mimeType = "image/webp";
+            image->image.assign(bytes, bytes + size);
+            image->as_is = true;
+            return true;
+        }
+
+        return tinygltf::LoadImageData(image, imageIndex, err, warn,
+            requestedWidth, requestedHeight, bytes, size, userData);
+    }
+
     static bool FileExists(const std::string &abs_filename, void *)
     {
+        if (isMeshoptFallbackURI(abs_filename))
+            return true;
+
         if (osgDB::containsServerAddress(abs_filename))
         {
             return true;
         }
         return osgDB::fileExists(abs_filename);
+    }
+
+    static uint32_t readUInt32LE(const char* ptr)
+    {
+        const unsigned char* bytes =
+            reinterpret_cast<const unsigned char*>(ptr);
+        return static_cast<uint32_t>(bytes[0]) |
+            (static_cast<uint32_t>(bytes[1]) << 8u) |
+            (static_cast<uint32_t>(bytes[2]) << 16u) |
+            (static_cast<uint32_t>(bytes[3]) << 24u);
+    }
+
+    static void writeUInt32LE(std::string& data, size_t offset, uint32_t value)
+    {
+        data[offset + 0] = static_cast<char>(value & 0xffu);
+        data[offset + 1] = static_cast<char>((value >> 8u) & 0xffu);
+        data[offset + 2] = static_cast<char>((value >> 16u) & 0xffu);
+        data[offset + 3] = static_cast<char>((value >> 24u) & 0xffu);
+    }
+
+    static bool prepareMeshoptFallbackBuffers(
+        std::string& data, bool binary, std::string& err)
+    {
+        static const uint32_t GLB_MAGIC = 0x46546c67u;
+        static const uint32_t GLB_JSON_CHUNK = 0x4e4f534au;
+
+        std::string jsonText;
+        size_t jsonDataEnd = 0;
+        uint32_t glbLength = 0;
+
+        if (binary)
+        {
+            if (data.size() < 20 || readUInt32LE(data.data()) != GLB_MAGIC)
+            {
+                err += "Invalid GLB header while preparing meshopt buffers.\n";
+                return false;
+            }
+
+            glbLength = readUInt32LE(data.data() + 8);
+            const uint32_t jsonLength = readUInt32LE(data.data() + 12);
+            const uint32_t chunkType = readUInt32LE(data.data() + 16);
+            jsonDataEnd = 20u + static_cast<size_t>(jsonLength);
+            if (glbLength > data.size() || jsonDataEnd > glbLength ||
+                chunkType != GLB_JSON_CHUNK)
+            {
+                err += "Invalid GLB JSON chunk while preparing meshopt buffers.\n";
+                return false;
+            }
+
+            jsonText.assign(data.data() + 20, jsonLength);
+            while (!jsonText.empty() && jsonText.back() == '\0')
+                jsonText.pop_back();
+        }
+        else
+        {
+            jsonText = data;
+        }
+
+        if (jsonText.find("EXT_meshopt_compression") == std::string::npos)
+            return true;
+
+        osgEarth::Util::Json::Reader jsonReader;
+        osgEarth::Util::Json::Value root;
+        if (!jsonReader.parse(jsonText, root, false))
+        {
+            err += "Failed to parse glTF JSON while preparing meshopt buffers:\n";
+            err += jsonReader.getFormatedErrorMessages();
+            return false;
+        }
+
+        bool meshoptRequired = false;
+        const osgEarth::Util::Json::Value& required = root["extensionsRequired"];
+        if (required.isArray())
+        {
+            for (unsigned int i = 0; i < required.size(); ++i)
+            {
+                if (required[i].isString() &&
+                    required[i].asString() == "EXT_meshopt_compression")
+                {
+                    meshoptRequired = true;
+                    break;
+                }
+            }
+        }
+
+#ifndef OSGEARTH_HAVE_MESH_OPTIMIZER
+        if (meshoptRequired)
+        {
+            err += "EXT_meshopt_compression is required, but osgEarth was "
+                "built without meshoptimizer support.\n";
+            return false;
+        }
+
+        // An optional extension has ordinary uncompressed fallback data, so
+        // leave it untouched for TinyGLTF to load.
+        return true;
+#endif
+
+        bool changed = false;
+        osgEarth::Util::Json::Value& buffers = root["buffers"];
+        if (buffers.isArray())
+        {
+            for (unsigned int i = 0; i < buffers.size(); ++i)
+            {
+                osgEarth::Util::Json::Value& buffer = buffers[i];
+                const osgEarth::Util::Json::Value& constBuffer = buffer;
+                const osgEarth::Util::Json::Value& meshopt =
+                    constBuffer["extensions"]["EXT_meshopt_compression"];
+                const bool taggedFallback =
+                    meshopt.isObject() && meshopt["fallback"].isBool() &&
+                    meshopt["fallback"].asBool();
+                const bool hasURI =
+                    constBuffer["uri"].isString() &&
+                    !constBuffer["uri"].asString().empty();
+                const bool uriLessFallback =
+                    meshoptRequired && !hasURI && (!binary || i > 0u);
+
+                if (taggedFallback || uriLessFallback)
+                {
+                    // TinyGLTF insists on loading every buffer before extension
+                    // processing. Supply a minimal placeholder; all referencing
+                    // bufferViews are replaced with decoded storage below.
+                    buffer["byteLength"] = 1u;
+                    buffer["uri"] = meshoptFallbackURI();
+                    changed = true;
+                }
+            }
+        }
+
+        if (!changed)
+            return true;
+
+        osgEarth::Util::Json::FastWriter jsonWriter;
+        std::string preparedJSON = jsonWriter.write(root);
+        if (!binary)
+        {
+            data.swap(preparedJSON);
+            return true;
+        }
+
+        while ((preparedJSON.size() & 3u) != 0u)
+            preparedJSON.push_back(' ');
+
+        const size_t remainingSize = glbLength - jsonDataEnd;
+        const size_t rebuiltSize = 20u + preparedJSON.size() + remainingSize;
+        if (preparedJSON.size() > std::numeric_limits<uint32_t>::max() ||
+            rebuiltSize > std::numeric_limits<uint32_t>::max())
+        {
+            err += "GLB is too large after preparing meshopt buffers.\n";
+            return false;
+        }
+
+        std::string rebuilt;
+        rebuilt.reserve(rebuiltSize);
+        rebuilt.append(data.data(), 12);
+        rebuilt.resize(20);
+        writeUInt32LE(rebuilt, 12, static_cast<uint32_t>(preparedJSON.size()));
+        writeUInt32LE(rebuilt, 16, GLB_JSON_CHUNK);
+        rebuilt.append(preparedJSON);
+        rebuilt.append(data.data() + jsonDataEnd, remainingSize);
+        writeUInt32LE(rebuilt, 8, static_cast<uint32_t>(rebuilt.size()));
+        data.swap(rebuilt);
+        return true;
     }
 
     struct Env
@@ -110,44 +326,43 @@ public:
         fs.WriteWholeFile = &tinygltf::WriteWholeFile;
         fs.user_data = (void*)&location;
         loader.SetFsCallbacks(fs);
+        loader.SetImageLoader(&GLTFReader::LoadImageData, nullptr);
 
         tinygltf::Options opt;
         opt.skip_imagery = readOptions && readOptions->getOptionString().find("gltfSkipImagery") != std::string::npos;
 
-        if (osgDB::containsServerAddress(location))
+        osgEarth::ReadResult rr = osgEarth::URI(location).readString(readOptions);
+        if (rr.failed())
         {
-            osgEarth::ReadResult rr = osgEarth::URI(location).readString(readOptions);
-            if (rr.failed())
-            {
-                return osgDB::ReaderWriter::ReadResult::FILE_NOT_FOUND;
-            }
-
-            std::string baseDir = osgDB::getFilePath(location);
-
-            std::string mem = rr.getString();
-
-            if (isBinary)
-            {
-                loader.LoadBinaryFromMemory(&model, &err, &warn, (const unsigned char*)mem.data(), mem.size(), baseDir, REQUIRE_VERSION, &opt);
-            }
-            else
-            {
-                loader.LoadASCIIFromString(&model, &err, &warn, mem.data(), mem.size(), baseDir, REQUIRE_VERSION, &opt);
-            }
-        }
-        else
-        {
-            if (isBinary)
-            {
-                loader.LoadBinaryFromFile(&model, &err, &warn, location, REQUIRE_VERSION, &opt);
-            }
-            else
-            {
-                loader.LoadASCIIFromFile(&model, &err, &warn, location, REQUIRE_VERSION, &opt);
-            }
+            return osgDB::ReaderWriter::ReadResult::FILE_NOT_FOUND;
         }
 
-        if (!err.empty()) {
+        std::string mem = rr.getString();
+        if (!prepareMeshoptFallbackBuffers(mem, isBinary, err))
+        {
+            OE_WARN << LC << "gltf Error loading " << location << std::endl;
+            OE_WARN << LC << err << std::endl;
+            return osgDB::ReaderWriter::ReadResult::ERROR_IN_READING_FILE;
+        }
+
+        const std::string baseDir = osgDB::getFilePath(location);
+        bool loaded = isBinary ?
+            loader.LoadBinaryFromMemory(
+                &model, &err, &warn,
+                reinterpret_cast<const unsigned char*>(mem.data()), mem.size(),
+                baseDir, REQUIRE_VERSION, &opt) :
+            loader.LoadASCIIFromString(
+                &model, &err, &warn, mem.data(), mem.size(),
+                baseDir, REQUIRE_VERSION, &opt);
+
+        if (!loaded || !err.empty()) {
+            OE_WARN << LC << "gltf Error loading " << location << std::endl;
+            OE_WARN << LC << err << std::endl;
+            return osgDB::ReaderWriter::ReadResult::ERROR_IN_READING_FILE;
+        }
+
+        if (!decodeMeshoptCompression(model, err))
+        {
             OE_WARN << LC << "gltf Error loading " << location << std::endl;
             OE_WARN << LC << err << std::endl;
             return osgDB::ReaderWriter::ReadResult::ERROR_IN_READING_FILE;
@@ -170,6 +385,7 @@ public:
         fs.WriteWholeFile = &tinygltf::WriteWholeFile;
         fs.user_data = (void*)&location;
         loader.SetFsCallbacks(fs);
+        loader.SetImageLoader(&GLTFReader::LoadImageData, nullptr);
 
         tinygltf::Options opt;
         opt.skip_imagery = readOptions && readOptions->getOptionString().find("gltfSkipImagery") != std::string::npos;
@@ -187,17 +403,32 @@ public:
             }
         }
 
-        std::string magic(*data, 0, 4);
-        if (magic == "glTF")
+        std::string preparedData = *data;
+        const bool binary = preparedData.compare(0, 4, "glTF") == 0;
+        if (!prepareMeshoptFallbackBuffers(preparedData, binary, err))
         {
-            loader.LoadBinaryFromMemory(&model, &err, &warn, reinterpret_cast<const unsigned char*>(data->c_str()), data->size(), "", REQUIRE_VERSION, &opt);
-        }
-        else
-        {
-            loader.LoadASCIIFromString(&model, &err, &warn, data->c_str(), data->size(), "", REQUIRE_VERSION, &opt);
+            OE_WARN << LC << "gltf Error loading " << location << std::endl;
+            OE_WARN << LC << err << std::endl;
+            return 0;
         }
 
-        if (!err.empty()) {
+        bool loaded = binary ?
+            loader.LoadBinaryFromMemory(
+                &model, &err, &warn,
+                reinterpret_cast<const unsigned char*>(preparedData.data()),
+                preparedData.size(), "", REQUIRE_VERSION, &opt) :
+            loader.LoadASCIIFromString(
+                &model, &err, &warn, preparedData.data(), preparedData.size(),
+                "", REQUIRE_VERSION, &opt);
+
+        if (!loaded || !err.empty()) {
+            OE_WARN << LC << "gltf Error loading " << location << std::endl;
+            OE_WARN << LC << err << std::endl;
+            return 0;
+        }
+
+        if (!decodeMeshoptCompression(model, err))
+        {
             OE_WARN << LC << "gltf Error loading " << location << std::endl;
             OE_WARN << LC << err << std::endl;
             return 0;
@@ -205,6 +436,198 @@ public:
 
         Env env(location, readOptions);
         return makeNodeFromModel(model, env);
+    }
+
+    static bool decodeMeshoptCompression(tinygltf::Model& model, std::string& err)
+    {
+#ifndef OSGEARTH_HAVE_MESH_OPTIMIZER
+        for (const auto& extension : model.extensionsRequired)
+        {
+            if (extension == "EXT_meshopt_compression")
+            {
+                err += "EXT_meshopt_compression is required, but osgEarth was "
+                    "built without meshoptimizer support.\n";
+                return false;
+            }
+        }
+        return true;
+#else
+        const char* extensionName = "EXT_meshopt_compression";
+
+        for (size_t viewIndex = 0; viewIndex < model.bufferViews.size(); ++viewIndex)
+        {
+            tinygltf::BufferView& bufferView = model.bufferViews[viewIndex];
+            auto extensionIt = bufferView.extensions.find(extensionName);
+            if (extensionIt == bufferView.extensions.end())
+                continue;
+
+            const tinygltf::Value& extension = extensionIt->second;
+            auto fail = [&](const std::string& message)
+            {
+                err += std::string(extensionName) + " bufferView[" +
+                    std::to_string(viewIndex) + "]: " + message + "\n";
+                return false;
+            };
+
+            if (!extension.IsObject())
+                return fail("extension value is not an object");
+
+            auto readSize = [&](const char* name, size_t& value, bool required, size_t defaultValue = 0)
+            {
+                const tinygltf::Value& property = extension.Get(name);
+                if (property.Type() == tinygltf::NULL_TYPE)
+                {
+                    value = defaultValue;
+                    return !required;
+                }
+                if (!property.IsInt() || property.Get<int>() < 0)
+                    return false;
+                value = static_cast<size_t>(property.Get<int>());
+                return true;
+            };
+
+            size_t sourceBufferIndex = 0;
+            size_t sourceOffset = 0;
+            size_t sourceLength = 0;
+            size_t stride = 0;
+            size_t count = 0;
+            if (!readSize("buffer", sourceBufferIndex, true) ||
+                !readSize("byteOffset", sourceOffset, false) ||
+                !readSize("byteLength", sourceLength, true) ||
+                !readSize("byteStride", stride, true) ||
+                !readSize("count", count, true))
+            {
+                return fail("missing or invalid integer property");
+            }
+
+            const tinygltf::Value& modeValue = extension.Get("mode");
+            if (!modeValue.IsString())
+                return fail("missing or invalid mode");
+            const std::string& mode = modeValue.Get<std::string>();
+
+            std::string filter = "NONE";
+            const tinygltf::Value& filterValue = extension.Get("filter");
+            if (filterValue.Type() != tinygltf::NULL_TYPE)
+            {
+                if (!filterValue.IsString())
+                    return fail("invalid filter");
+                filter = filterValue.Get<std::string>();
+            }
+
+            if (count == 0 || stride == 0 || sourceLength == 0)
+                return fail("count, byteStride, and byteLength must be nonzero");
+            if (count > std::numeric_limits<size_t>::max() / stride)
+                return fail("decoded byte length overflows size_t");
+
+            const size_t decodedLength = count * stride;
+            if (decodedLength != bufferView.byteLength)
+                return fail("decoded byte length does not match the parent bufferView");
+            if (bufferView.byteStride != 0 && bufferView.byteStride != stride)
+                return fail("byteStride does not match the parent bufferView");
+
+            if (mode == "ATTRIBUTES")
+            {
+                if ((stride % 4) != 0 || stride > 256)
+                    return fail("ATTRIBUTES byteStride must be a multiple of 4 and at most 256");
+            }
+            else if (mode == "TRIANGLES")
+            {
+                if ((count % 3) != 0 || (stride != 2 && stride != 4))
+                    return fail("TRIANGLES requires a count divisible by 3 and a byteStride of 2 or 4");
+            }
+            else if (mode == "INDICES")
+            {
+                if (stride != 2 && stride != 4)
+                    return fail("INDICES byteStride must be 2 or 4");
+            }
+            else
+            {
+                return fail("unsupported mode " + mode);
+            }
+
+            if (filter == "OCTAHEDRAL")
+            {
+                if (mode != "ATTRIBUTES" || (stride != 4 && stride != 8))
+                    return fail("OCTAHEDRAL filter requires ATTRIBUTES mode and a byteStride of 4 or 8");
+            }
+            else if (filter == "QUATERNION")
+            {
+                if (mode != "ATTRIBUTES" || stride != 8)
+                    return fail("QUATERNION filter requires ATTRIBUTES mode and a byteStride of 8");
+            }
+            else if (filter == "EXPONENTIAL")
+            {
+                if (mode != "ATTRIBUTES" || (stride % 4) != 0)
+                    return fail("EXPONENTIAL filter requires ATTRIBUTES mode and a byteStride divisible by 4");
+            }
+            else if (filter != "NONE")
+            {
+                return fail("unsupported filter " + filter);
+            }
+
+            if (sourceBufferIndex >= model.buffers.size())
+                return fail("compressed buffer index is out of range");
+            const std::vector<unsigned char>& source = model.buffers[sourceBufferIndex].data;
+            if (sourceOffset > source.size() || sourceLength > source.size() - sourceOffset)
+                return fail("compressed byte range is out of bounds");
+
+            std::vector<unsigned char> decoded(decodedLength);
+            const unsigned char* compressed = source.data() + sourceOffset;
+            int result = -1;
+            if (mode == "ATTRIBUTES")
+                result = meshopt_decodeVertexBuffer(decoded.data(), count, stride, compressed, sourceLength);
+            else if (mode == "TRIANGLES")
+                result = meshopt_decodeIndexBuffer(decoded.data(), count, stride, compressed, sourceLength);
+            else
+                result = meshopt_decodeIndexSequence(decoded.data(), count, stride, compressed, sourceLength);
+
+            if (result != 0)
+                return fail("meshoptimizer failed to decode the compressed data");
+
+            if (filter == "OCTAHEDRAL")
+                meshopt_decodeFilterOct(decoded.data(), count, stride);
+            else if (filter == "QUATERNION")
+                meshopt_decodeFilterQuat(decoded.data(), count, stride);
+            else if (filter == "EXPONENTIAL")
+                meshopt_decodeFilterExp(decoded.data(), count, stride);
+
+            tinygltf::Buffer decodedBuffer;
+            decodedBuffer.name = bufferView.name + " (meshopt decoded)";
+            decodedBuffer.data.swap(decoded);
+
+            bufferView.buffer = static_cast<int>(model.buffers.size());
+            bufferView.byteOffset = 0;
+            bufferView.byteLength = decodedLength;
+            bufferView.byteStride = stride;
+            bufferView.extensions.erase(extensionIt);
+            model.buffers.emplace_back(std::move(decodedBuffer));
+        }
+
+        for (size_t bufferIndex = 0; bufferIndex < model.buffers.size(); ++bufferIndex)
+        {
+            tinygltf::Buffer& buffer = model.buffers[bufferIndex];
+            if (!isMeshoptFallbackURI(buffer.uri))
+                continue;
+
+            for (size_t viewIndex = 0; viewIndex < model.bufferViews.size(); ++viewIndex)
+            {
+                if (model.bufferViews[viewIndex].buffer ==
+                    static_cast<int>(bufferIndex))
+                {
+                    err += std::string(extensionName) + " fallback buffer[" +
+                        std::to_string(bufferIndex) +
+                        "] is referenced by undecoded bufferView[" +
+                        std::to_string(viewIndex) + "]\n";
+                    return false;
+                }
+            }
+
+            buffer.data.clear();
+            buffer.uri.clear();
+        }
+
+        return true;
+#endif
     }
 
 
@@ -417,24 +840,56 @@ public:
             return top;
         }
 
-        osg::Texture2D* makeTextureFromModel(const tinygltf::Texture& texture) const
-
+        int getTextureSource(const tinygltf::Texture& texture) const
         {
-            const tinygltf::Image& image = model.images[texture.source];
+            auto extensionIt = texture.extensions.find("EXT_texture_webp");
+            if (extensionIt != texture.extensions.end() && extensionIt->second.IsObject())
+            {
+                const tinygltf::Value& source = extensionIt->second.Get("source");
+                if (source.IsInt())
+                    return source.Get<int>();
+            }
+            return texture.source;
+        }
+
+        osg::Image* makeImageFromModel(int source) const
+        {
+            if (source < 0 || static_cast<size_t>(source) >= model.images.size())
+                return nullptr;
+
+            const tinygltf::Image& image = model.images[source];
             bool imageEmbedded =
                 tinygltf::IsDataURI(image.uri) ||
                 image.image.size() > 0;
 
             osgEarth::URI imageURI(image.uri, env.referrer);
 
-            osg::ref_ptr<osg::Texture2D> tex;
-
-            //OE_DEBUG << "New Texture: " << imageURI.full() << ", embedded=" << imageEmbedded << std::endl;
-
-            // First load the image
             osg::ref_ptr<osg::Image> img;
 
-            if (image.image.size() > 0)
+            if (image.as_is && image.image.size() > 0)
+            {
+                osgDB::ReaderWriter* imageReader =
+                    osgDB::Registry::instance()->getReaderWriterForMimeType(image.mimeType);
+                if (!imageReader && image.mimeType == "image/webp")
+                    imageReader = osgDB::Registry::instance()->getReaderWriterForExtension("webp");
+
+                if (imageReader)
+                {
+                    std::string encoded(
+                        reinterpret_cast<const char*>(image.image.data()), image.image.size());
+                    std::istringstream stream(encoded, std::ios::in | std::ios::binary);
+                    osgDB::ReaderWriter::ReadResult result =
+                        imageReader->readImage(stream, env.readOptions);
+                    if (result.validImage())
+                    {
+                        img = result.takeImage();
+                        // Image plugins return OSG-oriented data. Embedded
+                        // glTF image bytes retain their top-row-first layout.
+                        img->flipVertical();
+                    }
+                }
+            }
+            else if (image.image.size() > 0)
             {
                 GLenum format = GL_RGB, texFormat = GL_RGB8;
                 if (image.component == 4) format = GL_RGBA, texFormat = GL_RGBA8;
@@ -458,6 +913,21 @@ public:
                 if (rr.validImage())
                     img = rr.takeImage();
             }
+
+            return img.release();
+        }
+
+        osg::Texture2D* makeTextureFromModel(const tinygltf::Texture& texture) const
+        {
+            const int source = getTextureSource(texture);
+            osg::ref_ptr<osg::Image> img = makeImageFromModel(source);
+
+            // If the WebP alternative cannot be decoded, retain the optional
+            // core PNG/JPEG fallback when one is present.
+            if (!img.valid() && source != texture.source)
+                img = makeImageFromModel(texture.source);
+
+            osg::ref_ptr<osg::Texture2D> tex;
 
             // If the image loaded OK, create the texture
             if (img.valid())
@@ -492,6 +962,82 @@ public:
                 }
             }
             return tex.release();
+        }
+
+        template<typename ArrayType>
+        static osg::Vec3Array* expandVertexArray(
+            const ArrayType* source,
+            double normalizationScale,
+            bool clampSignedNormalized)
+        {
+            if (!source)
+                return nullptr;
+
+            osg::Vec3Array* result = new osg::Vec3Array;
+            result->reserve(source->size());
+            for (const auto& value : *source)
+            {
+                osg::Vec3 vertex(
+                    static_cast<float>(value.x() / normalizationScale),
+                    static_cast<float>(value.y() / normalizationScale),
+                    static_cast<float>(value.z() / normalizationScale));
+
+                // glTF maps the most-negative signed integer to -1 as well.
+                if (clampSignedNormalized)
+                {
+                    vertex.x() = std::max(vertex.x(), -1.0f);
+                    vertex.y() = std::max(vertex.y(), -1.0f);
+                    vertex.z() = std::max(vertex.z(), -1.0f);
+                }
+                result->push_back(vertex);
+            }
+            result->setBinding(source->getBinding());
+            return result;
+        }
+
+        osg::Array* makeVertexArray(int accessorIndex) const
+        {
+            if (accessorIndex < 0 || static_cast<size_t>(accessorIndex) >= arrays.size())
+                return nullptr;
+
+            const tinygltf::Accessor& accessor = model.accessors[accessorIndex];
+            osg::Array* source = arrays[accessorIndex].get();
+            if (!source || accessor.type != TINYGLTF_TYPE_VEC3)
+                return nullptr;
+
+            // Geometry's PrimitiveFunctor and bounds computation only support
+            // floating-point vertex arrays. KHR_mesh_quantization permits the
+            // integer POSITION accessors handled below, so expand them while
+            // retaining their glTF normalization semantics.
+            switch (accessor.componentType)
+            {
+            case TINYGLTF_COMPONENT_TYPE_BYTE:
+                return expandVertexArray(
+                    dynamic_cast<osg::Vec3bArray*>(source),
+                    accessor.normalized ? 127.0 : 1.0,
+                    accessor.normalized);
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+                return expandVertexArray(
+                    dynamic_cast<osg::Vec3ubArray*>(source),
+                    accessor.normalized ? 255.0 : 1.0,
+                    false);
+            case TINYGLTF_COMPONENT_TYPE_SHORT:
+                return expandVertexArray(
+                    dynamic_cast<osg::Vec3sArray*>(source),
+                    accessor.normalized ? 32767.0 : 1.0,
+                    accessor.normalized);
+            case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT:
+                return expandVertexArray(
+                    dynamic_cast<osg::Vec3usArray*>(source),
+                    accessor.normalized ? 65535.0 : 1.0,
+                    false);
+            case TINYGLTF_COMPONENT_TYPE_FLOAT:
+                return source;
+            default:
+                OE_WARN << LC << "Unsupported POSITION component type "
+                    << accessor.componentType << std::endl;
+                return nullptr;
+            }
         }
 
         osg::Group* makeMesh(const tinygltf::Mesh& mesh, bool prepInstancing) const
@@ -584,7 +1130,10 @@ public:
                             {
                                 int index = i->second;
                                 const tinygltf::Texture& texture = model.textures[index];
-                                const tinygltf::Image& image = model.images[texture.source];
+                                const int source = getTextureSource(texture);
+                                if (source < 0 || static_cast<size_t>(source) >= model.images.size())
+                                    continue;
+                                const tinygltf::Image& image = model.images[source];
                                 // don't cache embedded textures!
                                 bool imageEmbedded =
                                     tinygltf::IsDataURI(image.uri) ||
@@ -655,7 +1204,7 @@ public:
 
                     if (it->first.compare("POSITION") == 0)
                     {
-                        geom->setVertexArray(arrays[it->second].get());
+                        geom->setVertexArray(makeVertexArray(it->second));
                     }
                     else if (it->first.compare("NORMAL") == 0)
                     {
@@ -685,10 +1234,10 @@ public:
                 if (!geom->getColorArray())
                 {
                     osg::Vec4Array* colors = new osg::Vec4Array();
-                    osg::Vec3Array* verts = static_cast<osg::Vec3Array*>(geom->getVertexArray());
-                    for (unsigned int i = 0; i < verts->size(); i++)
+                    osg::Array* verts = geom->getVertexArray();
+                    if (verts)
                     {
-                        colors->push_back(baseColorFactor);
+                        colors->assign(verts->getNumElements(), baseColorFactor);
                     }
                     geom->setColorArray(colors, osg::Array::BIND_PER_VERTEX);
                 }
