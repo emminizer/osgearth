@@ -199,6 +199,7 @@ void oe_LineDrawable_VS_CLIP(inout vec4 currClip)
 
 uniform int oe_GL_LineStippleFactor;
 uniform int oe_GL_LineStipplePattern;
+uniform float oe_dpr = 1.0;
 
 flat in vec2 oe_LineDrawable_rv;
 flat in int oe_LineDrawable_draw;
@@ -215,7 +216,7 @@ void oe_LineDrawable_Stippler_FS(inout vec4 color)
     if (oe_GL_LineStipplePattern != 0xffff)
     {
         // coordinate of the fragment, shifted to 0:
-        vec2 coord = (gl_FragCoord.xy - 0.5);
+        vec2 coord = (gl_FragCoord.xy - 0.5) / oe_dpr;
 
         // rotate the frag coord onto the X-axis so we can sample the 
         // stipple pattern:
