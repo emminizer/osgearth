@@ -26,8 +26,9 @@ public:
     InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop=osg::CopyOp::SHALLOW_COPY);
 
     META_Node(osgEarth, InstancedGeometry);
-    
-    virtual void compileGLObjects(osg::RenderInfo& renderInfo) const;
+
+    void drawImplementation(osg::RenderInfo &renderInfo) const override;
+
     void setVertexAttribDivisor(unsigned int index, unsigned int divisor)
     {
         if (index >= _divisors.size())
@@ -42,9 +43,9 @@ public:
         if (index < _divisors.size())
         {
             return _divisors[index];
-        }
+    }
         else
-        {
+    {
             return 0;
         }
     }
@@ -102,7 +103,7 @@ namespace
                 }
                 for (int j = 0; j < 8; ++j)
                 {
-                    resultBB.expandBy(initBB.corner(i) * instanceTransform);
+                    resultBB.expandBy(initBB.corner(j) * instanceTransform);
                 }
                 
             }
@@ -144,30 +145,23 @@ InstancedGeometry::InstancedGeometry(const InstancedGeometry& geometry,const osg
 {
 }
 
-void InstancedGeometry::compileGLObjects(osg::RenderInfo& renderInfo) const
+void InstancedGeometry::drawImplementation(osg::RenderInfo &renderInfo) const
 {
-    Geometry::compileGLObjects(renderInfo);
-    osg::State& state = *renderInfo.getState();
+    osg::State &state = *renderInfo.getState();
     bool useVertexArrayObject = state.useVertexArrayObject(_useVertexArrayObject);
     if (useVertexArrayObject)
     {
-        osg::VertexArrayState* vas = _vertexArrayStateList[renderInfo.getContextID()].get();
-        if (!vas)
-        {
-            return;
-        }
-        osg::State::SetCurrentVertexArrayStateProxy setVASProxy(state, vas);
-        state.bindVertexArrayObject(vas);
-        const osg::GLExtensions* extensions = state.get<osg::GLExtensions>();
+        const osg::GLExtensions *extensions = state.get<osg::GLExtensions>();
         if (extensions->glVertexAttribDivisor)
         {
-            for (int i = 0; i < _divisors.size(); ++i)
+            for (unsigned int i = 0; i < _divisors.size(); ++i)
             {
                 extensions->glVertexAttribDivisor(i, _divisors[i]);
             }
         }
-        state.unbindVertexArrayObject();
     }
+
+    Geometry::drawImplementation(renderInfo);
 }
 
 InstanceBuilder::InstanceBuilder()
@@ -198,7 +192,7 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
     osg::Geometry::PrimitiveSetList& prims = geometry->getPrimitiveSetList();
     for (osg::Geometry::PrimitiveSetList::iterator it = prims.begin(), end = prims.end();
          it != end;
-        ++it)
+         ++it)
     {
         (*it)->setNumInstances(numInstances);
     }

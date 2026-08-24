@@ -69,7 +69,7 @@ float DistributionGGX(vec3 N, vec3 H, float roughness)
     float denom = (NdotH2 * (a2 - 1.0) + 1.0);
     denom = PI * denom * denom;
 
-    return num / denom;
+    return num / max(denom, 1e-6);
 }
 
 float GeometrySchlickGGX(float NdotX, float roughness)
@@ -80,7 +80,7 @@ float GeometrySchlickGGX(float NdotX, float roughness)
     float nom = NdotX;
     float denom = NdotX * (1.0 - k) + k;
 
-    return nom / denom;
+    return nom / max(denom, 1e-6);
 }
 
 //float GeometrySmith(vec3 N, vec3 V, vec3 L, float roughness)
@@ -96,7 +96,13 @@ float GeometrySmith(float NdotV, float NdotL, float roughness)
 
 vec3 FresnelSchlick(float cosTheta, vec3 F0)
 {
-    return F0 + (1.0 - F0) * pow(max(1.0 - cosTheta, 0.0), 5.0);
+    return F0 + (1.0 - F0) * pow(1.0 - clamp(cosTheta, 0.0, 1.0), 5.0);
+}
+
+vec3 atmos_safeNormalize(vec3 value, vec3 fallback)
+{
+    float length2 = dot(value, value);
+    return length2 > 1e-12 ? value * inversesqrt(length2) : fallback;
 }
 
 const float oe_wrap = 0.22;
@@ -110,10 +116,11 @@ void atmos_fragment_main_pbr(inout vec4 color)
 #endif
 
     // SRGB to linear for PBR compute:
-    vec3 albedo = pow(color.rgb, vec3(2.2));
+    vec3 albedo = pow(max(color.rgb, vec3(0.0)), vec3(2.2));
 
-    vec3 N = normalize(vp_Normal);
-    vec3 V = normalize(-vp_VertexView);
+    vec3 U = atmos_safeNormalize(atmos_up, vec3(0.0, 0.0, 1.0));
+    vec3 N = atmos_safeNormalize(vp_Normal, U);
+    vec3 V = atmos_safeNormalize(-vp_VertexView, N);
 
     vec3 F0 = vec3(0.04);
     F0 = mix(F0, albedo, vec3(oe_pbr.metal));
@@ -123,9 +130,15 @@ void atmos_fragment_main_pbr(inout vec4 color)
 
     for (int i = 0; i < OE_NUM_LIGHTS; ++i)
     {
+        if (!osg_LightSource[i].enabled)
+            continue;
+
         // per-light radiance:
-        vec3 L = normalize(osg_LightSource[i].position.xyz - vp_VertexView);
-        vec3 H = normalize(V + L);
+        vec3 lightVector = osg_LightSource[i].position.w == 0.0 ?
+            osg_LightSource[i].position.xyz :
+            osg_LightSource[i].position.xyz - vp_VertexView;
+        vec3 L = atmos_safeNormalize(lightVector, N);
+        vec3 H = atmos_safeNormalize(V + L, N);
         //float distance = length(osg_LightSource[i].position.xyz - atmos_vert);
         //float attenuation = 1.0 / (distance * distance);
         vec3 radiance = osg_LightSource[i].diffuse.rgb; // * attenuation
@@ -139,8 +152,9 @@ void atmos_fragment_main_pbr(inout vec4 color)
         float NdotV = max(0.0, dot(N, V));
 
         // cook-torrance BRDF:
-        float NDF = DistributionGGX(N, H, oe_pbr.roughness);
-        float G = GeometrySmith(NdotV, NdotL_wrap, oe_pbr.roughness);
+        float roughness = clamp(oe_pbr.roughness, 0.0, 1.0);
+        float NDF = DistributionGGX(N, H, roughness);
+        float G = GeometrySmith(NdotV, NdotL_wrap, roughness);
         vec3 F = FresnelSchlick(max(dot(H, V), 0.0), F0);
 
         vec3 kS = F;
@@ -152,7 +166,7 @@ void atmos_fragment_main_pbr(inout vec4 color)
         vec3 specular = NdotL > 0.0 ? numerator / max(denominator, 0.001) : vec3(0.0);
 
         // daytime metric
-        float day = i == 0 ? max(0.0, dot(atmos_up, L)) : 1.0;
+        float day = i == 0 ? max(0.0, dot(U, L)) : 1.0;
 
         // color contribution
         Lo += (kD * albedo / PI + specular) * radiance * NdotL_wrap * day;
@@ -166,10 +180,11 @@ void atmos_fragment_main_pbr(inout vec4 color)
     color.rgb = ambient + Lo;
 
     // tone map:
+    color.rgb = max(color.rgb, vec3(0.0));
     color.rgb = color.rgb / (color.rgb + vec3(1.0));
 
     // add in the haze
-    color.rgb += pow(atmos_color, vec3(2.2)); // add in the (SRGB) color
+    color.rgb += pow(max(atmos_color, vec3(0.0)), vec3(2.2)); // add in the (SRGB) color
 
     // exposure:
     color.rgb = 1.0 - exp(-oe_sky_exposure * color.rgb);
@@ -178,7 +193,7 @@ void atmos_fragment_main_pbr(inout vec4 color)
     //color.rgb = ((color.rgb - 0.5)*oe_pbr.contrast + 0.5) * oe_pbr.brightness;
 
     // linear back to SRGB
-    color.rgb = pow(color.rgb, vec3(1.0/2.2));
+    color.rgb = pow(max(color.rgb, vec3(0.0)), vec3(1.0/2.2));
 }
 
 #else
@@ -192,14 +207,14 @@ void atmos_fragment_material(inout vec4 color)
     // https://en.wikibooks.org/wiki/GLSL_Programming/GLUT/Specular_Highlights
 
     // normal vector at vertex
-    vec3 N = normalize(vp_Normal);
+    vec3 N = atmos_safeNormalize(vp_Normal, vec3(0.0, 0.0, 1.0));
     //vec3 N = normalize(gl_FrontFacing ? vp_Normal : -vp_Normal);
 
     float shine = clamp(osg_FrontMaterial.shininess, 1.0, 128.0);
     vec4 surfaceSpecularity = osg_FrontMaterial.specular;
 
     // up vector at vertex
-    vec3 U = normalize(atmos_up);
+    vec3 U = atmos_safeNormalize(atmos_up, N);
 
     // Accumulate the lighting for each component separately.
     vec3 totalDiffuse = vec3(0.0);
@@ -215,28 +230,30 @@ void atmos_fragment_material(inout vec4 color)
             float attenuation = 1.0;
 
             // L is the normalized camera-to-light vector.
-            vec3 L = normalize(osg_LightSource[i].position.xyz);
+            vec3 L = atmos_safeNormalize(osg_LightSource[i].position.xyz, N);
 
             // V is the normalized vertex-to-camera vector.
-            vec3 V = -normalize(vp_VertexView);
+            vec3 V = atmos_safeNormalize(-vp_VertexView, N);
 
             // point or spot light:
             if (osg_LightSource[i].position.w != 0.0)
             {
                 // VLu is the unnormalized vertex-to-light vector
                 vec3 Lu = osg_LightSource[i].position.xyz - vp_VertexView;
+                L = atmos_safeNormalize(Lu, N);
 
                 // calculate attenuation:
                 float distance = length(Lu);
-                attenuation = 1.0 / (
+                attenuation = 1.0 / max(
                     osg_LightSource[i].constantAttenuation +
                     osg_LightSource[i].linearAttenuation * distance +
-                    osg_LightSource[i].quadraticAttenuation * distance * distance);
+                    osg_LightSource[i].quadraticAttenuation * distance * distance,
+                    1e-6);
 
                 // for a spot light, the attenuation help form the cone:
                 if (osg_LightSource[i].spotCutoff <= 90.0)
                 {
-                    vec3 D = normalize(osg_LightSource[i].spotDirection);
+                    vec3 D = atmos_safeNormalize(osg_LightSource[i].spotDirection, vec3(0.0, 0.0, -1.0));
                     float clampedCos = max(0.0, dot(-L,D));
                     attenuation = clampedCos < osg_LightSource[i].spotCosCutoff ?
                         0.0 :
@@ -293,7 +310,7 @@ void atmos_fragment_material(inout vec4 color)
     }
 
     // add the atmosphere color, and incorpoate the lights.
-    color.rgb += atmos_color;
+    color.rgb += max(atmos_color, vec3(0.0));
 
     vec3 lightColor =
         osg_FrontMaterial.emission.rgb +
@@ -305,7 +322,7 @@ void atmos_fragment_material(inout vec4 color)
         totalSpecular; // * osg_FrontMaterial.specular.rgb;
 
     // Simulate HDR by applying an exposure factor (1.0 is none, 2-3 are reasonable)
-    color.rgb = 1.0 - exp(-oe_sky_exposure * 0.33 * color.rgb);
+    color.rgb = 1.0 - exp(-oe_sky_exposure * 0.33 * max(color.rgb, vec3(0.0)));
 }
 
 #endif
