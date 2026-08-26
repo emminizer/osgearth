@@ -403,6 +403,7 @@ namespace
 
             if (hasChild())
             {
+                setLODMethod(LODMethod::SCREEN_SPACE);
                 setMinPixels(1600);
                 setRefinePolicy(REFINE_REPLACE);
 
@@ -541,6 +542,7 @@ namespace
 
         if (hasChild())
         {
+            setLODMethod(LODMethod::SCREEN_SPACE);
             setMinPixels(880);
             setRefinePolicy(REFINE_ADD);
 
@@ -614,6 +616,7 @@ namespace
 
             if (hasChild())
             {
+                setLODMethod(LODMethod::SCREEN_SPACE);
                 setMinPixels(880);
                 setRefinePolicy(REFINE_ADD);
 
@@ -686,6 +689,7 @@ namespace
            
             addChild(build());
 
+            setLODMethod(LODMethod::SCREEN_SPACE);
             setMinPixels(3200);
             setRefinePolicy(REFINE_REPLACE);
 
@@ -769,6 +773,7 @@ namespace
 
             if (hasChild())
             {
+                setLODMethod(LODMethod::SCREEN_SPACE);
                 setMinPixels(640);
                 setRefinePolicy(REFINE_REPLACE);
 
@@ -945,6 +950,7 @@ namespace
 
             if (hasChild())
             {
+                setLODMethod(LODMethod::SCREEN_SPACE);
                 setMinPixels(880);
                 setRefinePolicy(REFINE_REPLACE);
 
