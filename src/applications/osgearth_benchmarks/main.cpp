@@ -16,11 +16,10 @@
 #include <osgEarth/Coverage>
 #include <osgEarth/ImageUtils>
 #include <osgEarth/MBTiles>
+#include <osgEarth/FileUtils>
 #include <osgDB/ReadFile>
-#include <filesystem>
 
 using namespace osgEarth;
-namespace fs = std::filesystem;
 
 namespace
 {
@@ -381,7 +380,7 @@ static void BM_FileSystemSingleThreadedRead(benchmark::State& state)
     }
 
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
-    fs::remove_all(CACHE_PATH);
+    Util::removeDirectory(CACHE_PATH);
 }
 // Superseded by the controlled Cache/* benchmark matrix in CacheBenchmarks.cpp.
 
@@ -408,7 +407,7 @@ static void BM_FileSystemSingleThreadedWrite(benchmark::State& state)
     }
 
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
-    fs::remove_all(CACHE_PATH);
+    Util::removeDirectory(CACHE_PATH);
 }
 
 
@@ -447,7 +446,7 @@ static void BM_SQLite3SingleThreadedRead(benchmark::State& state)
     }
 
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
-    fs::remove_all(CACHE_PATH);
+    Util::removeDirectory(CACHE_PATH);
 }
 
 namespace
@@ -457,7 +456,7 @@ namespace
         SQLite3ConcurrentReadFixture()
         {
             path = "sqlite_concurrent_read_cache";
-            fs::remove_all(path);
+            Util::removeDirectory(path);
 
             Config config;
             config.fromJSON("{ \"path\": \"" + path + "\" }");
@@ -483,7 +482,7 @@ namespace
         {
             bin = nullptr;
             cache = nullptr;
-            fs::remove_all(path);
+            Util::removeDirectory(path);
         }
 
         std::string path;
@@ -539,7 +538,7 @@ static void BM_SQLite3SystemSingleThreadedWrite(benchmark::State& state)
     }
 
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
-    fs::remove_all(CACHE_PATH);
+    Util::removeDirectory(CACHE_PATH);
 }
 
 
