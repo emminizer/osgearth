@@ -383,7 +383,7 @@ static void BM_FileSystemSingleThreadedRead(benchmark::State& state)
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
     fs::remove_all(CACHE_PATH);
 }
-BENCHMARK(BM_FileSystemSingleThreadedRead)->Iterations(1);
+// Superseded by the controlled Cache/* benchmark matrix in CacheBenchmarks.cpp.
 
 static void BM_FileSystemSingleThreadedWrite(benchmark::State& state)
 {
@@ -411,7 +411,6 @@ static void BM_FileSystemSingleThreadedWrite(benchmark::State& state)
     fs::remove_all(CACHE_PATH);
 }
 
-BENCHMARK(BM_FileSystemSingleThreadedWrite)->Iterations(1);
 
 static void BM_SQLite3SingleThreadedRead(benchmark::State& state)
 {
@@ -450,7 +449,6 @@ static void BM_SQLite3SingleThreadedRead(benchmark::State& state)
     // Remove the CACHE_PATH directory after the benchmark to clean up the generated files
     fs::remove_all(CACHE_PATH);
 }
-BENCHMARK(BM_SQLite3SingleThreadedRead)->Iterations(1);
 
 namespace
 {
@@ -517,7 +515,6 @@ static void BM_SQLite3ConcurrentRead(benchmark::State& state)
         benchmark::DoNotOptimize(result.getImage());
     }
 }
-BENCHMARK(BM_SQLite3ConcurrentRead)->ThreadRange(1, 8)->UseRealTime()->Unit(benchmark::kMicrosecond);
 
 static void BM_SQLite3SystemSingleThreadedWrite(benchmark::State& state)
 {
@@ -545,7 +542,6 @@ static void BM_SQLite3SystemSingleThreadedWrite(benchmark::State& state)
     fs::remove_all(CACHE_PATH);
 }
 
-BENCHMARK(BM_SQLite3SystemSingleThreadedWrite)->Iterations(1);
 
 static void BM_CompressImage_FastDXT(benchmark::State& state)
 {
