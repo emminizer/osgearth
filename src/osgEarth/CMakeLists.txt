@@ -131,6 +131,7 @@ SET(TARGET_H
     BuildGeometryFilter
     BuildTextFilter
     Cache
+    CacheStats
     CacheBin
     CachePolicy
     CacheSeed
@@ -502,6 +503,7 @@ set(TARGET_SRC
     BuildGeometryFilter.cpp
     BuildTextFilter.cpp
     Cache.cpp
+    CacheStats.cpp
     CacheBin.cpp
     CachePolicy.cpp
     CacheSeed.cpp
