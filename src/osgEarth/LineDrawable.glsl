@@ -79,10 +79,29 @@ void oe_LineDrawable_VS_CLIP(inout vec4 currClip)
     vec4 prevClip = gl_ProjectionMatrix * oe_LineDrawable_prevView;
     vec4 nextClip = gl_ProjectionMatrix * oe_LineDrawable_nextView;
 
-    // Transform all points into pixel space
-    vec2 prevPixel = ((prevClip.xy/prevClip.w)+1.0) * 0.5*oe_Camera.xy;
+    // Prevent perspective flips when a line segment crosses the camera's near plane.
+    // If an adjacent vertex is behind the camera (w <= 0) while the current vertex
+    // is in front (w > 0), the perspective divide (xy / w) will project the adjacent
+    // pixel to the wrong side of the screen. This invalidates the 2D screen-space
+    // direction vector needed for line extrusion and stippling.
+    // We manually clip the segment against a near-plane approximation (w = 1e-4)
+    // to find a safe clip-space coordinate that remains in front of the camera.
+    vec4 safePrevClip = prevClip;
+    if (safePrevClip.w <= 1e-4 && currClip.w > 1e-4) {
+        float t = (1e-4 - currClip.w) / (safePrevClip.w - currClip.w);
+        safePrevClip = mix(currClip, safePrevClip, t);
+    }
+
+    vec4 safeNextClip = nextClip;
+    if (safeNextClip.w <= 1e-4 && currClip.w > 1e-4) {
+        float t = (1e-4 - currClip.w) / (safeNextClip.w - currClip.w);
+        safeNextClip = mix(currClip, safeNextClip, t);
+    }
+
+    // Transform all points into pixel space using the clipped coordinates
+    vec2 prevPixel = ((safePrevClip.xy/safePrevClip.w)+1.0) * 0.5*oe_Camera.xy;
     vec2 currPixel = ((currClip.xy/currClip.w)+1.0) * 0.5*oe_Camera.xy;
-    vec2 nextPixel = ((nextClip.xy/nextClip.w)+1.0) * 0.5*oe_Camera.xy;
+    vec2 nextPixel = ((safeNextClip.xy/safeNextClip.w)+1.0) * 0.5*oe_Camera.xy;
 
 #ifdef OE_LINE_SMOOTH
     float thickness = floor(oe_GL_LineWidth + 1.0) * oe_dpr;
