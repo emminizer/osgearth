@@ -154,6 +154,13 @@ Layer::setReadOptions(const osgDB::Options* readOptions)
             options().osgOptionString().get() + " " +
             _readOptions->getOptionString());
     }
+
+    // An already-open layer will not run openImplementation() when added to a map.
+    // Closed layers defer this until open so subsequent option changes still take effect.
+    if (isOpen())
+    {
+        updateCacheSettings();
+    }
 }
 
 const osgDB::Options*
@@ -377,6 +384,13 @@ Layer::open(const osgDB::Options* readOptions)
 Status
 Layer::openImplementation()
 {
+    updateCacheSettings();
+    return Status::OK();
+}
+
+void
+Layer::updateCacheSettings()
+{
     // Create some local cache settings for this layer.
     // There might be a CacheSettings object in the readoptions that
     // came from the map. If so, copy it.
@@ -411,8 +425,6 @@ Layer::openImplementation()
 
     // Store it for further propagation!
     _cacheSettings->store(_readOptions.get());
-
-    return Status::OK();
 }
 
 Status
