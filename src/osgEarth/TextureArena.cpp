@@ -3,6 +3,7 @@
 * MIT License
 */
 #include "TextureArena"
+#include "MaterialArena"
 #include "ImageUtils"
 #include "Math"
 #include "Metrics"
@@ -13,10 +14,20 @@
 #include <osg/Texture2D>
 #include <osg/Texture3D>
 #include <osg/Texture2DArray>
+#include <cstdlib>
+#include <chrono>
+#include <cmath>
+#include <limits>
 
 // osg 3.6:
 #ifndef GL_TEXTURE_2D_ARRAY
 #define GL_TEXTURE_2D_ARRAY 0x8C1A
+#endif
+#ifndef GL_COMPRESSED_SRGB_S3TC_DXT1_EXT
+#define GL_COMPRESSED_SRGB_S3TC_DXT1_EXT 0x8C4C
+#endif
+#ifndef GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT
+#define GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT 0x8C4F
 #endif
 
 // This is typically a bad idea because you could be altering a texture
@@ -148,18 +159,27 @@ Texture::getPixelFormat() const
 GLTexture::Ptr
 Texture::getGLObject(osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     return GLObjects::get(_globjects, state)._gltexture;
 }
 
 bool
 Texture::isCompiled(const osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto gltex = GLObjects::get(_globjects, state)._gltexture;
     return gltex != nullptr && gltex->valid();
 }
 
 bool
 Texture::needsCompile(const osg::State& state) const
+{
+    std::lock_guard<std::mutex> lock(_glMutex);
+    return needsCompile_no_lock(state);
+}
+
+bool
+Texture::needsCompile_no_lock(const osg::State& state) const
 {
     auto& gc = GLObjects::get(_globjects, state);
 
@@ -172,6 +192,21 @@ Texture::needsCompile(const osg::State& state) const
         return true;
 
     return (hasImageData && osgTexture()->getImage(0)->getModifiedCount() != gc._imageModCount);
+}
+
+std::size_t
+Texture::estimateUploadBytes() const
+{
+    std::lock_guard<std::mutex> lock(_glMutex);
+    std::size_t result = 0;
+    if (osgTexture().valid())
+        for (unsigned i = 0; i < osgTexture()->getNumImages(); ++i)
+            if (auto* image = osgTexture()->getImage(i))
+            {
+                const auto size = image->getTotalSizeInBytesIncludingMipmaps();
+                result += std::min<std::size_t>(size, std::numeric_limits<std::size_t>::max() - result);
+            }
+    return result;
 }
 
 bool
@@ -212,7 +247,9 @@ Texture::isFBO() const
 bool
 Texture::compileGLObjects(osg::State& state) const
 {
-    if (!needsCompile(state))
+    std::lock_guard<std::mutex> lock(_glMutex);
+
+    if (!needsCompile_no_lock(state))
         return false;
 
     OE_DEBUG << LC << "Compiling " << name() << std::endl;
@@ -237,15 +274,24 @@ Texture::compileGLObjects(osg::State& state) const
     }
 
     auto* to = osgTexture()->getTextureObject(state.getContextID());
-    if (to)
+    if (to && to->isAllocated())
     {
         // This texture already HAS a compiled texture object, so let's wrap it.
         // The caller remains responsible for the texture's lifetime.
-        gc._gltexture = GLTexture::wrap(to->target(), to->id(), state);
+        auto gltexture = GLTexture::wrap(to->target(), to->id(), state);
+        gltexture->debugLabel(category(), name());
 
         // Create bindless handle and make it resident!
-        gc._gltexture->handle(state);
-        gc._gltexture->makeResident(state, true);
+        if (gltexture->handle(state, !gc._compileFailed) == 0)
+        {
+            gc._compileFailed = true;
+            return false;
+        }
+        gltexture->makeResident(state, true);
+        gc._gltexture = std::move(gltexture);
+        gc._compileFailed = false;
+        if (image)
+            gc._imageModCount = image->getModifiedCount();
 
         return true;
     }
@@ -285,8 +331,8 @@ Texture::compileGLObjects(osg::State& state) const
             dataType = image->getDataType();
 
             gpuInternalFormat =
-                image->isCompressed() ? image->getInternalTextureFormat() :
                 internalFormat().isSet() ? internalFormat().get() :
+                image->isCompressed() ? image->getInternalTextureFormat() :
                 pixelFormat == GL_RED && dataType == GL_FLOAT ? GL_R32F :
                 pixelFormat == GL_RED && dataType == GL_UNSIGNED_SHORT ? GL_R16 :
                 pixelFormat == GL_RED && dataType == GL_UNSIGNED_BYTE ? GL_R8 :
@@ -296,10 +342,11 @@ Texture::compileGLObjects(osg::State& state) const
 
             if (compress() && !image->isCompressed())
             {
+                const bool srgb = gpuInternalFormat == GL_SRGB8 || gpuInternalFormat == GL_SRGB8_ALPHA8;
                 if (pixelFormat == GL_RGB)
-                    gpuInternalFormat = GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
+                    gpuInternalFormat = srgb ? GL_COMPRESSED_SRGB_S3TC_DXT1_EXT : GL_COMPRESSED_RGB_S3TC_DXT1_EXT;
                 else if (pixelFormat == GL_RGBA)
-                    gpuInternalFormat = GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+                    gpuInternalFormat = srgb ? GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT5_EXT : GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
             }
 
             // set up the first mipmap level to enforce the size limiter (maxDim)
@@ -331,29 +378,36 @@ Texture::compileGLObjects(osg::State& state) const
             clamp_r() ? GL_CLAMP_TO_EDGE : GL_REPEAT,
             maxAnisotropy().getOrUse(4.0f));
 
-        gc._gltexture = GLTexture::create(
+        auto gltexture = GLTexture::create(
             target(),
             state,
             profileHint);
 
-        OE_SOFT_ASSERT(gc._gltexture->name() != 0, "Oh no, GLTexture name == 0");
+        OE_SOFT_ASSERT(gltexture->name() != 0, "Oh no, GLTexture name == 0");
 
-        gc._gltexture->bind(state);
+        gltexture->bind(state);
 
-        gc._gltexture->debugLabel(category(), name());
+        gltexture->debugLabel(category(), name());
 
         if (target() == GL_TEXTURE_2D)
         {
-            gc._gltexture->storage2D(profileHint);
+            gltexture->storage2D(profileHint);
         }
         else if (target() == GL_TEXTURE_3D || target() == GL_TEXTURE_2D_ARRAY)
         {
-            gc._gltexture->storage3D(profileHint);
+            gltexture->storage3D(profileHint);
         }
 
         // Force creation of the bindless handle - once you do this, you can
         // no longer change the texture parameters.
-        gc._gltexture->handle(state);
+        if (gltexture->handle(state, !gc._compileFailed) == 0)
+        {
+            gc._compileFailed = true;
+            // This allocation belongs to us. Do not leave failed storage in
+            // the recycling pool, where it would be reused on the next retry.
+            gltexture->release();
+            return false;
+        }
 
         // debugging
         OE_DEVEL << LC
@@ -363,6 +417,42 @@ Texture::compileGLObjects(osg::State& state) const
 
         if (image)
         {
+            // Read once; leave format queries and name lookup out of the normal upload path.
+            static const bool warnGPUWork = std::getenv("OSGEARTH_TEXTURE_ARENA_WARN_GPU_WORK") != nullptr;
+            if (warnGPUWork)
+            {
+                // Inspect the allocated storage to cover explicit compressed internal formats too.
+                GLint compressedStorage = GL_FALSE;
+                glGetTexLevelParameteriv(target(), 0, GL_TEXTURE_COMPRESSED_ARB, &compressedStorage);
+                bool gpuCompression = false;
+                if (compressedStorage == GL_TRUE)
+                {
+                    for (unsigned i = 0; i < imageCount; ++i)
+                        gpuCompression = gpuCompression || !osgTexture()->getImage(i)->isCompressed();
+                }
+                const bool gpuMipmaps = numMipLevelsInMemory < numMipLevelsToAllocate;
+                if (gpuCompression || gpuMipmaps)
+                {
+                    std::string label = name();
+                    if (label.empty()) label = osgTexture()->getName();
+                    if (label.empty()) label = image->getFileName();
+                    if (label.empty()) label = image->getName();
+                    if (label.empty() && uri().isSet()) label = uri()->full();
+                    if (label.empty()) label = "<unnamed>";
+
+                    std::string source = uri().isSet() ? uri()->full() : std::string();
+                    for (unsigned i = 0; source.empty() && i < imageCount; ++i)
+                        source = osgTexture()->getImage(i)->getFileName();
+
+                    OE_WARN << LC << "Compiling texture '" << label << "' ("
+                        << widthToAllocate << "x" << heightToAllocate << "x" << depthToAllocate << ") requires GPU "
+                        << (gpuCompression ? "compression" : "")
+                        << (gpuCompression && gpuMipmaps ? " and " : "")
+                        << (gpuMipmaps ? "mipmap generation" : "")
+                        << (source.empty() ? "" : " source='" + source + "'") << std::endl;
+                }
+            }
+
             // Blit our image to the GPU
             for (unsigned imageIndex = 0; imageIndex < imageCount; ++imageIndex)
             {
@@ -388,7 +478,9 @@ Texture::compileGLObjects(osg::State& state) const
                         GLsizei blockSize; // unused
 
                         osg::Texture::getCompressedSize(
-                            gpuInternalFormat,
+                            // Size the source blocks. The GPU format may be
+                            // sRGB S3TC, which OSG 3.6's size helper does not know.
+                            image->getPixelFormat(),
                             mipLevelWidth, mipLevelHeight, 1,
                             blockSize, mipmapBytes);
                     }
@@ -406,7 +498,7 @@ Texture::compileGLObjects(osg::State& state) const
 
                             if (compressed)
                             {
-                                gc._gltexture->compressedSubImage2D(
+                                gltexture->compressedSubImage2D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     mipLevelWidth, mipLevelHeight,
@@ -416,7 +508,7 @@ Texture::compileGLObjects(osg::State& state) const
                             }
                             else
                             {
-                                gc._gltexture->subImage2D(
+                                gltexture->subImage2D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     mipLevelWidth, mipLevelHeight,
@@ -433,7 +525,7 @@ Texture::compileGLObjects(osg::State& state) const
 
                             if (compressed)
                             {
-                                gc._gltexture->compressedSubImage3D(
+                                gltexture->compressedSubImage3D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     imageIndex + r, // zoffset (array layer)
@@ -445,7 +537,7 @@ Texture::compileGLObjects(osg::State& state) const
                             }
                             else
                             {
-                                gc._gltexture->subImage3D(
+                                gltexture->subImage3D(
                                     mipLevel - firstMipLevel,
                                     0, 0, // xoffset, yoffset
                                     imageIndex + r, // zoffset (array layer)
@@ -481,7 +573,9 @@ Texture::compileGLObjects(osg::State& state) const
         }
 
         // finally, make it resident.
-        gc._gltexture->makeResident(state, true);
+        gltexture->makeResident(state, true);
+        gc._gltexture = std::move(gltexture);
+        gc._compileFailed = false;
     }
 
     // sync the mod counts.
@@ -496,6 +590,7 @@ Texture::compileGLObjects(osg::State& state) const
 void
 Texture::makeResident(const osg::State& state, bool toggle) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto& gc = GLObjects::get(_globjects, state);
 
     if (gc._gltexture != nullptr && gc._gltexture->valid())
@@ -511,6 +606,7 @@ Texture::makeResident(const osg::State& state, bool toggle) const
 bool
 Texture::isResident(const osg::State& state) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     auto& gc = GLObjects::get(_globjects, state);
     return (gc._gltexture != nullptr && gc._gltexture->isResident(state));
 }
@@ -518,6 +614,7 @@ Texture::isResident(const osg::State& state) const
 void
 Texture::resizeGLObjectBuffers(unsigned maxSize)
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
     if (_globjects.size() < maxSize)
         _globjects.resize(maxSize);
 
@@ -528,6 +625,8 @@ Texture::resizeGLObjectBuffers(unsigned maxSize)
 void
 Texture::releaseGLObjects(osg::State* state, bool force) const
 {
+    std::lock_guard<std::mutex> lock(_glMutex);
+
     // If this texture has a valid host that means it
     // belongs to an arena, which will take responsibility
     // for GL release.
@@ -575,7 +674,7 @@ Texture::releaseGLObjects(osg::State* state, bool force) const
 #define LC "[TextureArena] "
 
 
-TextureArena::TextureArena()
+TextureArena::TextureArena() : _materials(new MaterialArena())
 {
     // Keep this synchronous w.r.t. the render thread since we are
     // going to be changing things on the fly
@@ -585,9 +684,42 @@ TextureArena::TextureArena()
         [this](osg::NodeVisitor& nv) { this->update(nv); }));
 }
 
+void
+TextureArena::setUploadBudget(const UploadBudget& budget)
+{
+    std::lock_guard<std::mutex> lock(_m);
+    _uploadBudget = budget;
+    if (!std::isfinite(_uploadBudget.milliseconds) || _uploadBudget.milliseconds < 0.0)
+        _uploadBudget.milliseconds = 0.0;
+}
+
+TextureArena::UploadBudget
+TextureArena::getUploadBudget() const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    return _uploadBudget;
+}
+
+TextureArena::UploadStats
+TextureArena::getUploadStats(const osg::State& state) const
+{
+    std::lock_guard<std::mutex> lock(_m);
+    const auto& gc = GLObjects::get(_globjects, state);
+    auto result = gc._uploadStats;
+    result.pending = gc._toCompile.size();
+    return result;
+}
+
 TextureArena::~TextureArena()
 {
     releaseGLObjects(nullptr);
+}
+
+// Return the shared material registry whose GPU handles this texture arena
+// refreshes during apply. The returned pointer is owned by this TextureArena.
+MaterialArena* TextureArena::getMaterialArena() const
+{
+    return _materials.get();
 }
 
 void
@@ -681,7 +813,7 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
             {
                 if (_globjects[i]._inUse)
                 {
-                    _globjects[i]._toCompile.push(existingIndex);
+                    _globjects[i].queueCompile(existingIndex);
                 }
             }
             tex->dormant() = false;
@@ -748,7 +880,9 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
                     image->getPixelFormat() == GL_RGBA ? GL_RGBA8 :
                     GL_RGBA8;
 
-                image->setInternalTextureFormat(internalFormat);
+                // An image may back both sRGB albedo and linear PBR textures.
+                // Normalize the texture's format without changing the shared image.
+                tex->internalFormat() = internalFormat;
             }
 
 #ifdef COMPRESS_AND_MIPMAP_ON_DEMAND
@@ -792,7 +926,7 @@ TextureArena::add(Texture::Ptr tex, const osgDB::Options* readOptions)
     {
         if (_globjects[i]._inUse)
         {
-            _globjects[i]._toCompile.push(index);
+            _globjects[i].queueCompile(index);
         }
     }
 
@@ -918,10 +1052,19 @@ TextureArena::flush()
 void
 TextureArena::apply(osg::State& state) const
 {
-    if (_textures.empty())
-        return;
+    applyInternal(state, true);
+}
 
+void
+TextureArena::applyInternal(osg::State& state, bool budgeted) const
+{
     std::lock_guard<std::mutex> lock(_m);
+
+    if (_textures.empty())
+    {
+        _materials->apply(state, {}, 0);
+        return;
+    }
 
     OE_PROFILING_ZONE;
 
@@ -932,12 +1075,11 @@ TextureArena::apply(osg::State& state) const
     {
         gc._inUse = true;
 
-        while (!gc._toCompile.empty())
-            gc._toCompile.pop();
+        gc.clearCompileQueue();
 
         for (unsigned i = 0; i < _textures.size(); ++i) {
             if (_textures[i])
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
         }
     }
 
@@ -948,9 +1090,9 @@ TextureArena::apply(osg::State& state) const
         for (auto& i : _dynamicTextures)
         {
             auto tex = _textures[i];
-            if (tex && tex->needsCompile(state))
+            if (tex && !tex->dormant() && tex->needsCompile(state))
             {
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
             }
         }
     }
@@ -988,15 +1130,12 @@ TextureArena::apply(osg::State& state) const
         gc._handleBufferDirty = true;
     }
 
-#if !defined(OSGEARTH_SINGLE_GL_CONTEXT)
-
-    // only apply once per frame per state.
-    // (This is disabled in single-context mode so that it always runs)
-
-    if (state.getFrameStamp() && (gc._lastAppliedFrame != state.getFrameStamp()->getFrameNumber()))
-
-#endif
+    // Limit all render passes, including single-context builds, to one batch per frame/share group.
+    // Explicit precompilation must finish its batch even if rendering already used this frame's budget.
+    if (!budgeted || !state.getFrameStamp() || !gc._hasAppliedFrame ||
+        gc._lastAppliedFrame != state.getFrameStamp()->getFrameNumber())
     {
+        gc._uploadStats = UploadStats();
         // If we are going to compile any textures, we need to save and restore
         // the OSG texture state...
         if (!gc._toCompile.empty())
@@ -1007,31 +1146,53 @@ TextureArena::apply(osg::State& state) const
             auto savedActiveOsgTexture = state.getLastAppliedTextureAttribute(
                 state.getActiveTextureUnit(), osg::StateAttribute::TEXTURE);
 
-            unsigned num_compiled = 0;
+            const auto start = std::chrono::steady_clock::now();
+            auto& stats = gc._uploadStats;
 
-            while (!gc._toCompile.empty())
+            // Bound retries to the batch that existed on entry. Failed attempts go to its tail.
+            const auto numToCompile = gc._toCompile.size();
+            for (std::size_t i = 0; i < numToCompile; ++i)
             {
-                int ptr = gc._toCompile.front();
-                gc._toCompile.pop();
+                if (budgeted && i > 0 && _uploadBudget.milliseconds > 0.0 &&
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() >=
+                        _uploadBudget.milliseconds)
+                    break;
+
+                const int ptr = gc._toCompile.front();
                 auto tex = _textures[ptr];
-                if (tex)
+                const bool needsCompile = tex && !tex->dormant() && tex->needsCompile(state);
+                const std::size_t bytes = needsCompile ? tex->estimateUploadBytes() : 0u;
+                if (budgeted && needsCompile && stats.attempted > 0 &&
+                    ((_uploadBudget.textures > 0 && stats.attempted >= _uploadBudget.textures) ||
+                     (_uploadBudget.bytes > 0 && bytes > _uploadBudget.bytes - std::min(stats.bytes, _uploadBudget.bytes))))
+                    break;
+
+                gc._toCompile.pop();
+                gc._queued.erase(ptr);
+                if (tex && tex->dormant()) continue;
+                if (needsCompile)
                 {
+                    ++stats.attempted;
+                    stats.bytes += std::min(bytes, std::numeric_limits<std::size_t>::max() - stats.bytes);
                     if (tex->compileGLObjects(state))
                     {
-                        ++num_compiled;
+                        ++stats.compiled;
                         OE_DEVEL << "Compiled on demand = " << tex->name() << " " << (std::uintptr_t)tex.get() << std::endl;
                     }
+                    if (tex->needsCompile(state)) gc.queueCompile(ptr);
                 }
 
-                GLTexture* gltex = nullptr;
-                if (tex)
-                    gltex = Texture::GLObjects::get(tex->_globjects, state)._gltexture.get();
-
-                GLuint64 handle = gltex ? gltex->handle(state) : 0ULL;
-                unsigned index = _useUBO ? ptr * 2 : ptr; // hack for std140 vec4 alignment
-                gc._handles[index] = handle;
-                gc._handleBufferDirty = true;
+                auto gltex = tex ? tex->getGLObject(state) : GLTexture::Ptr();
+                const GLuint64 handle = gltex ? gltex->handle(state) : 0ULL;
+                const unsigned index = _useUBO ? ptr * 2 : ptr; // std140 vec4 alignment
+                if (gc._handles[index] != handle)
+                {
+                    gc._handles[index] = handle;
+                    gc._handleBufferDirty = true;
+                }
             }
+            stats.milliseconds =
+                std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
 
             // reinstate the old bound texture
             if (savedActiveOsgTexture)
@@ -1040,9 +1201,10 @@ TextureArena::apply(osg::State& state) const
             }
         }
 
-        if (state.getFrameStamp())
+        if (budgeted && state.getFrameStamp())
         {
             gc._lastAppliedFrame = state.getFrameStamp()->getFrameNumber();
+            gc._hasAppliedFrame = true;
         }
     }
 
@@ -1075,9 +1237,20 @@ TextureArena::apply(osg::State& state) const
     {
         gc._handleBuffer->uploadData(gc._handles);
         gc._handleBufferDirty = false;
+        ++gc._handleRevision;
+    }
+
+    // Handles are shareable; residency must be established in each context.
+    auto& residentRevision = gc._residentRevisions[state.getGraphicsContext()];
+    if (residentRevision != gc._handleRevision)
+    {
+        for (const auto& texture : _textures)
+            if (texture && !texture->dormant()) texture->makeResident(state, true);
+        residentRevision = gc._handleRevision;
     }
 
     gc._handleBuffer->bindBufferBase(_bindingPoint);
+    _materials->apply(state, gc._handles, gc._handleRevision, _useUBO ? 2u : 1u);
 }
 
 void
@@ -1103,13 +1276,14 @@ TextureArena::notifyOfTextureRelease(osg::State* state) const
 void
 TextureArena::compileGLObjects(osg::State& state) const
 {
-    apply(state);
+    applyInternal(state, false);
 }
 
 void
 TextureArena::resizeGLObjectBuffers(unsigned maxSize)
 {
     std::lock_guard<std::mutex> lock(_m);
+    _materials->resizeGLObjectBuffers(maxSize);
 
     if (_globjects.size() < maxSize)
     {
@@ -1133,6 +1307,7 @@ void
 TextureArena::releaseGLObjects(osg::State* state, bool force) const
 {
     std::lock_guard<std::mutex> lock(_m);
+    _materials->releaseGLObjects(state);
 
     //OE_DEVEL << LC << "releaseGLObjects on arena " << getName() << std::endl;
 
@@ -1143,15 +1318,14 @@ TextureArena::releaseGLObjects(osg::State* state, bool force) const
         gc._handleBuffer = nullptr;
         gc._handles.resize(0);
 
-        while (!gc._toCompile.empty())
-            gc._toCompile.pop();
+        gc.clearCompileQueue();
 
         for (unsigned i = 0; i < _textures.size(); ++i)
         {
             if (_textures[i])
             {
                 _textures[i]->releaseGLObjects(state, force);
-                gc._toCompile.push(i);
+                gc.queueCompile(i);
             }
         }
     }
@@ -1171,14 +1345,13 @@ TextureArena::releaseGLObjects(osg::State* state, bool force) const
                 gc._handleBuffer = nullptr;
                 gc._handles.resize(0);
 
-                while (!gc._toCompile.empty())
-                    gc._toCompile.pop();
+                gc.clearCompileQueue();
 
                 for (unsigned i = 0; i < _textures.size(); ++i)
                 {
                     if (_textures[i])
                     {
-                        gc._toCompile.push(i);
+                        gc.queueCompile(i);
                     }
                 }
             }

@@ -13,6 +13,8 @@
 #include <osgDB/ReadFile>
 #include <osgDB/Archive>
 #include <osgDB/ObjectWrapper>
+#include <limits>
+#include <osgDB/ObjectWrapper>
 
 #ifdef OSGEARTH_HAVE_SUPERLUMINALAPI
 #include <Superluminal/PerformanceAPI.h>

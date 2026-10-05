@@ -6,6 +6,7 @@
 #include <osgEarth/InstanceBuilder>
 #include <osgEarth/VirtualProgram>
 #include <osgEarth/Shaders>
+#include <osgEarth/ShaderLoader>
 #include <osgEarth/Registry>
 #include <osgEarth/Capabilities>
 #include <osg/VertexAttribDivisor>
@@ -23,6 +24,9 @@ class InstancedGeometry : public osg::Geometry
 {
 public:
     InstancedGeometry();
+    InstancedGeometry(
+        const osg::Geometry& geometry,
+        const osg::CopyOp& copyop = osg::CopyOp::SHALLOW_COPY);
     InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop=osg::CopyOp::SHALLOW_COPY);
 
     META_Node(osgEarth, InstancedGeometry);
@@ -136,13 +140,31 @@ namespace
 
 InstancedGeometry::InstancedGeometry()
 {
-    setUseVertexArrayObject(osgEarth::Registry::capabilities().supportsVertexArrayObjects());
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
+}
+
+InstancedGeometry::InstancedGeometry(
+    const osg::Geometry& geometry,
+    const osg::CopyOp& copyop) :
+    osg::Geometry(geometry, copyop)
+{
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
 }
 
 InstancedGeometry::InstancedGeometry(const InstancedGeometry& geometry,const osg::CopyOp& copyop)
     : Geometry(geometry, copyop),
       _divisors(geometry._divisors.begin(), geometry._divisors.end())
 {
+    setUseDisplayList(false);
+    setUseVertexBufferObjects(true);
+    setUseVertexArrayObject(
+        osgEarth::Registry::capabilities().supportsVertexArrayObjects());
 }
 
 void InstancedGeometry::drawImplementation(osg::RenderInfo &renderInfo) const
@@ -180,11 +202,21 @@ osg::Geometry* InstanceBuilder::createGeometry()
     return new InstancedGeometry;
 }
 
+osg::Geometry* InstanceBuilder::createGeometry(
+    const osg::Geometry& source,
+    const osg::CopyOp& copyop)
+{
+    return new InstancedGeometry(source, copyop);
+}
+
 void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
 {
     // XXX do something more clever
     int numInstances = _positions->getNumElements();
-    osg::StateSet* ss = geometry->getOrCreateStateSet();
+    // Loaded models may share their material state and shader program.
+    osg::StateSet* ss = geometry->getStateSet() ?
+        osg::clone(geometry->getStateSet(), osg::CopyOp::SHALLOW_COPY) : new osg::StateSet;
+    geometry->setStateSet(ss);
     // assign the instance parameters
     setPerVertexOrOverall(geometry, _positions.get(), _position.get(), POSITION_ATTRIB);
     setPerVertexOrOverall(geometry, _rotations.get(), _rotation.get(), ROTATION_ATTRIB);
@@ -196,10 +228,17 @@ void InstanceBuilder::installInstancing(osg::Geometry* geometry) const
     {
         (*it)->setNumInstances(numInstances);
     }
-    VirtualProgram* vp = VirtualProgram::getOrCreate(ss);
+    VirtualProgram* vp = VirtualProgram::cloneOrCreate(ss);
     vp->setName("DrawInstancedAttribute");
-    osgEarth::Shaders pkg;
-    pkg.load(vp, pkg.DrawInstancedAttribute);
+    // Resolving the shader source (the file-system override lookup and
+    // include processing) costs far more than installing it and never
+    // changes, so resolve it once rather than per instanced geometry.
+    static const std::string instancingSource = []()
+    {
+        osgEarth::Shaders pkg;
+        return osgEarth::ShaderLoader::load(pkg.DrawInstancedAttribute, pkg);
+    }();
+    osgEarth::ShaderLoader::load(vp, instancingSource);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_position", POSITION_ATTRIB);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_rotation", ROTATION_ATTRIB);
     vp->addBindAttribLocation("oe_DrawInstancedAttribute_scale", SCALE_ATTRIB);
