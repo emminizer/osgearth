@@ -1130,7 +1130,11 @@ TextureArena::applyInternal(osg::State& state, bool budgeted) const
         gc._handleBufferDirty = true;
     }
 
-    // Limit all render passes, including single-context builds, to one batch per frame/share group.
+    // Only throttle render passes when the caller has opted into at least one upload limit.
+    // Unlimited arenas must also process textures added by later passes in the same frame.
+    budgeted = budgeted &&
+        (_uploadBudget.milliseconds > 0.0 || _uploadBudget.bytes > 0u || _uploadBudget.textures > 0u);
+
     // Explicit precompilation must finish its batch even if rendering already used this frame's budget.
     if (!budgeted || !state.getFrameStamp() || !gc._hasAppliedFrame ||
         gc._lastAppliedFrame != state.getFrameStamp()->getFrameNumber())
