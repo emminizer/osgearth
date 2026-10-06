@@ -274,10 +274,11 @@ namespace osgEarth
                     if (ImGui::Button("Install Prestige sky") && view(ri) && view(ri)->getViewerBase())
                     {
                         osg::ref_ptr<MapNode> map = _mapNode.get();
-                        osg::ref_ptr<osgViewer::View> targetView = view(ri);
+                        // Views may be stack-allocated; queued operations must not take ownership of them.
+                        osg::observer_ptr<osgViewer::View> targetView = view(ri);
                         targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, targetView]()
                         {
-                            if (findTopMostNodeOfType<SkyNode>(targetView->getSceneData())) return;
+                            if (!targetView.valid() || findTopMostNodeOfType<SkyNode>(targetView->getSceneData())) return;
                             osg::ref_ptr<osgEarthPrestige::SkyNode> sky = new osgEarthPrestige::SkyNode;
                             if (map->getMapSRS()->isProjected())
                                 sky->setReferencePoint(map->getMap()->getProfile()->getExtent().getCentroid());
@@ -374,10 +375,11 @@ namespace osgEarth
                 {
                     osg::ref_ptr<MapNode> map = _mapNode.get();
                     osg::ref_ptr<SkyNode> sky = _skyNode.get();
-                    osg::ref_ptr<osgViewer::View> targetView = view(ri);
+                    // The viewer owns this update operation and may itself live on the stack.
+                    osg::observer_ptr<osgViewer::View> targetView = view(ri);
                     targetView->getViewerBase()->addUpdateOperation(new OneTimer([map, sky, targetView]()
                     {
-                        if (findTopMostNodeOfType<ShadowCaster>(targetView->getSceneData())) return;
+                        if (!targetView.valid() || findTopMostNodeOfType<ShadowCaster>(targetView->getSceneData())) return;
                         int unit;
                         if (!map->getTerrainEngine()->getResources()->reserveTextureImageUnit(unit,"ShadowCaster")) return;
                         osg::ref_ptr<ShadowCaster> caster = new ShadowCaster;
