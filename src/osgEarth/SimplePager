@@ -67,7 +67,10 @@ namespace osgEarth { namespace Util
         void setTimeoutSeconds(double value);
         float getTimeoutSeconds() const { return _timeoutSeconds; }
 
-        //! Whether to install cluster culling for geographic nodes
+        //! Whether to install cluster culling for geographic nodes. Default = false.
+        //! Uses only the zero-elevation tile footprint, ignoring terrain and payload heights.
+        //! Enable only when this footprint conservatively bounds visibility of the entire paged subtree.
+        //! Set before build(); changing this does not update callbacks on existing pages.
         void setClusterCullingEnabled(bool value);
         bool getClusterCullingEnabled() const;
 
@@ -138,7 +141,7 @@ namespace osgEarth { namespace Util
         float _priorityOffset = 0.0f;
         bool _canCancel = true;
         bool _done = false;
-        bool _clusterCullingEnabled = true;
+        bool _clusterCullingEnabled = false;
         bool _usePayloadBoundsForChildren = false;
         double _timeoutSeconds = 0.0;
 
