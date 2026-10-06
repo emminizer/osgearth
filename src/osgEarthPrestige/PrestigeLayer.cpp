@@ -81,10 +81,17 @@ namespace
         if (progress && progress->isCanceled())
             return {};
 
-        osg::ref_ptr< osg::Node > node = osgDB::readNodeFile(uri.full(), readOptions);
+        auto rr = uri.readNode(readOptions);
+
         if (progress && progress->isCanceled())
             return {};
-        return chonks && node ? ChonkFactory::convertScene(node.get(), chonks) : node;
+
+        osg::ref_ptr<osg::Node> node = rr.getNode();
+
+        if (chonks && node.valid())
+            return ChonkFactory::convertScene(node.get(), chonks);
+        else
+            return node;
     }
 
     bool readSidecarBounds(

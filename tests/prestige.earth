@@ -216,6 +216,15 @@
   </prestige:vegetation>
 
   <viewpoints home="0" time="2">
+
+    <viewpoint name="NYC Central Park">
+        <heading>-157.348</heading>
+        <pitch>-2.31631</pitch>
+        <range>1193.12m</range>
+        <long>-73.95828445458397</long>
+        <lat>40.7919138480493</lat>
+    </viewpoint>
+
     <viewpoint name="Pitt">
       <heading>-103.549</heading>
       <pitch>-2.64635</pitch>

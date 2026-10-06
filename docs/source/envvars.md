@@ -8,12 +8,6 @@
 
 ### Debugging
 
-Set `OSGEARTH_TEXTURE_ARENA_WARN_GPU_WORK=1` before starting the application to warn whenever
-a TextureArena texture compile requires GPU compression or mipmap generation. Warnings include
-the texture name, source URI/filename when available, and allocated width x height x depth
-(or layer count for arrays). Any set value enables this diagnostic;
-the setting is read once on the first image upload. Disabled by default.
-
 | Variable | Description | Default |
 | -------- | ----------- | ------- |
 | OSGEARTH_NOTIFY_LEVEL | Verbosity of console output. Options are `DEBUG`, `INFO`, `NOTICE`, and `FATAL`. `INFO` is usually sufficient for most debugging purposes. | `NOTICE` |
@@ -26,7 +20,7 @@ the setting is read once on the first image upload. Disabled by default.
 | OSGEARTH_HEADLESS | Set this to `1` to simulate a headless environment in which no OpenGL graphics hardware is available. ||
 | OSGEARTH_CACHE_DEBUG | Set `1` to see verbose cache activity reporting on the console. Not supported by all cache drivers. ||
 | OSGEARTH_REX_DEBUG | Set to `1` and the terrain engine will render a bounding box for each terrain tile. ||
-|||
+|OSGEARTH_TEXTURE_ARENA_WARN_GPU_WORK|warn whenever a TextureArena texture compile requires GPU compression or mipmap generation||
 
 
 ### Caching
