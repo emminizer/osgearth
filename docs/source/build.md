@@ -79,7 +79,7 @@ sudo apt-get install libglew-dev
 ```
 Build OpenSceneGraph. You can customize the `OPENGL_PROFILE` based on your needs:
 ```
-git clone https://github.com/openscenegraph/OpenSceneGraph.git
+git clone --branch OpenSceneGraph-3.6.5 https://github.com/openscenegraph/OpenSceneGraph.git
 cd OpenSceneGraph
 mkdir build && cd build
 cmake .. -DOPENGL_PROFILE=GL3 -DOSG_GL_CONTEXT_VERSION=4.6
