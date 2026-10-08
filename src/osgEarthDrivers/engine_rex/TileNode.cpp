@@ -241,8 +241,12 @@ TileNode::setElevationRaster(Texture::Ptr image, const osg::Matrixf& matrix)
 {
     if (image != getElevationRaster() || matrix != getElevationMatrix())
     {
-        if ( _surface.valid() )
-            _surface->setElevationRaster( image, matrix );
+        if (_surface.valid())
+        {
+            _surface->setElevationRaster(image, matrix);
+            // The surface is not an OSG child, so invalidate this tile's bounds explicitly.
+            dirtyBound();
+        }
     }
 }
 
