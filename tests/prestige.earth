@@ -1,19 +1,10 @@
-<!-- Prestige prototype layer. -->
-<map name="Prestige prototype">
-  <libraries>osgEarthPrestige</libraries>
+<map name="Prestige Demo" xmlns:prestige="osgEarthPrestige">
 
-  <XYZImage name="Google Imagery" open="true">
-    <url><![CDATA[ https://www.google.com/maps/vt?lyrs=s@189&gl=cn&x={x}&y={y}&z={z} ]]></url>
-    <texture_compression>cpu</texture_compression>
-  </XYZImage>
+  <xi:include href="readymap_imagery.xml" texture_compression="auto"/>
+  <xi:include href="readymap_elevation.xml"/>
 
-  <TMSElevation name="ReadyMap 90m Elevation">
-    <url>https://readymap.org/readymap/tiles/1.0.0/116/</url>
-    <vdatum>egm96</vdatum>
-  </TMSElevation>
-
-  <prestige:prestige name="Prestige Buildings" enabled="true">
-    <url>D:/data/prestige/Prestige_ktx/models/prestige/</url>
+  <prestige:prestige name="Prestige Buildings">
+    <url>https://pelican-public.s3.us-east-1.amazonaws.com/prestige_test/</url>
     <profile>spherical-mercator</profile>
     <additive>false</additive>
     <lod0_extension>gltf</lod0_extension>
@@ -226,13 +217,13 @@
     </viewpoint>
 
     <viewpoint name="Pitt">
-      <heading>-103.549</heading>
-      <pitch>-2.64635</pitch>
-      <range>1355.49m</range>
-      <long>-79.99705874461937</long>
-      <lat>40.4399649662581</lat>
-      <height>220.3948163352907</height>
-      <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
+        <heading>-169.321</heading>
+        <pitch>-5.95494</pitch>
+        <range>224.053m</range>
+        <long>-80.00003358184316</long>
+        <lat>40.45265538828784</lat>
+        <height>198.6391675788909</height>
+        <srs>+proj=longlat +datum=WGS84 +no_defs</srs>
     </viewpoint>
 
     <viewpoint name="NY Alley">
