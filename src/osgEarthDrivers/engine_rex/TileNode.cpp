@@ -599,6 +599,8 @@ TileNode::update(osg::NodeVisitor& nv)
                     sampler._texture = sampler._futureTexture;
                     sampler._futureTexture = nullptr;
                     sampler._matrix.makeIdentity();
+                    // Invalidate cached draw commands when the active sampler changes.
+                    ++_revision;
                     ++numFuturesResolved;
                 }
                 else if (ft->failed())
